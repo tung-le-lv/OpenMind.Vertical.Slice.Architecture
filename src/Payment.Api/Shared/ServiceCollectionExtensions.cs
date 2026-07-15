@@ -1,0 +1,45 @@
+using Amazon.DynamoDBv2;
+using Amazon.SimpleNotificationService;
+using Amazon.SQS;
+using Payment.Api.Domain.Repositories;
+using Payment.Api.Infrastructure.EventBus;
+using Payment.Api.Infrastructure.PaymentGateway;
+using Payment.Api.Infrastructure.Repositories;
+using Payment.Api.Shared.Application.Interfaces;
+
+namespace Payment.Api.Shared;
+
+internal static class ServiceCollectionExtensions
+{
+    internal static IServiceCollection AddCoreServices(this IServiceCollection services)
+    {
+        services.AddSingleton<IAmazonDynamoDB, AmazonDynamoDBClient>();
+        services.AddSingleton<IPaymentRepository, DynamoDbPaymentRepository>();
+        services.AddSingleton<IPaymentGateway, FakePaymentGateway>();
+        services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(DynamoDbPaymentRepository).Assembly));
+
+        return services;
+    }
+
+    internal static IServiceCollection AddEventBus(this IServiceCollection services)
+    {
+        if (Environment.GetEnvironmentVariable("USE_LOCAL_EVENT_BUS") == "true")
+        {
+            var credentials = new Amazon.Runtime.BasicAWSCredentials("test", "test");
+            var localstackEndpoint = Environment.GetEnvironmentVariable("LOCALSTACK_ENDPOINT") ?? "http://localhost:4566";
+            var region = Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION") ?? "ap-southeast-2";
+            services.AddSingleton<IAmazonSimpleNotificationService>(_ => new AmazonSimpleNotificationServiceClient(
+                credentials, new AmazonSimpleNotificationServiceConfig { ServiceURL = localstackEndpoint, AuthenticationRegion = region }));
+            services.AddSingleton<IAmazonSQS>(_ => new AmazonSQSClient(
+                credentials, new AmazonSQSConfig { ServiceURL = localstackEndpoint, AuthenticationRegion = region }));
+        }
+        else
+        {
+            services.AddSingleton<IAmazonSimpleNotificationService, AmazonSimpleNotificationServiceClient>();
+            services.AddSingleton<IAmazonSQS, AmazonSQSClient>();
+        }
+        services.AddSingleton<IEventBus, SnsEventBus>();
+
+        return services;
+    }
+}

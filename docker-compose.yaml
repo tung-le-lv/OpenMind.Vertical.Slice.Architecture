@@ -1,0 +1,213 @@
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    ports:
+      - "8000:8000"
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb"]
+    volumes:
+      - dynamodb-data:/home/dynamodblocal
+    networks:
+      - openmind-local
+
+  dynamodb-setup:
+    image: amazon/aws-cli
+    depends_on:
+      - dynamodb-local
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-southeast-2
+    entrypoint: ["/bin/sh"]
+    command:
+      - "-c"
+      - |
+        ENDPOINT=http://dynamodb-local:8000
+        TABLE=Orders-local
+        INDEXES='[
+          {
+            "IndexName": "CustomerIdIndex",
+            "KeySchema": [{"AttributeName": "customerId", "KeyType": "HASH"}],
+            "Projection": {"ProjectionType": "ALL"}
+          },
+          {
+            "IndexName": "OrderDateIndex",
+            "KeySchema": [
+              {"AttributeName": "orderDate", "KeyType": "HASH"},
+              {"AttributeName": "createdAt", "KeyType": "RANGE"}
+            ],
+            "Projection": {"ProjectionType": "ALL"}
+          }
+        ]'
+
+        until aws --endpoint-url=$$ENDPOINT dynamodb list-tables; do
+          echo 'Waiting for DynamoDB Local...'
+          sleep 2
+        done
+
+        if aws --endpoint-url=$$ENDPOINT dynamodb describe-table --table-name $$TABLE 2>/dev/null; then
+          echo 'Table already exists, skipping creation.'
+        else
+          echo 'Creating DynamoDB table...'
+          aws --endpoint-url=$$ENDPOINT dynamodb create-table \
+            --table-name $$TABLE \
+            --attribute-definitions \
+              AttributeName=id,AttributeType=S \
+              AttributeName=customerId,AttributeType=S \
+              AttributeName=orderDate,AttributeType=S \
+              AttributeName=createdAt,AttributeType=S \
+            --key-schema AttributeName=id,KeyType=HASH \
+            --billing-mode PAY_PER_REQUEST \
+            --global-secondary-indexes "$$INDEXES"
+        fi
+
+        if aws --endpoint-url=$$ENDPOINT dynamodb get-item --table-name $$TABLE --key '{"id":{"S":"order-sample-1"}}' 2>/dev/null | grep -q '"S"'; then
+          echo 'Data already seeded, skipping.'
+        else
+          echo 'Seeding sample orders...'
+          aws --endpoint-url=$$ENDPOINT dynamodb put-item --table-name $$TABLE --item \
+            '{"id":{"S":"order-sample-1"},"orderDate":{"S":"2026-06-01"},"customerId":{"S":"cust-1"},"totalAmount":{"N":"149.97"},"status":{"S":"Pending"},"createdAt":{"S":"2026-06-01T00:00:00.0000000Z"},"updatedAt":{"S":"2026-06-01T00:00:00.0000000Z"},"items":{"S":"[{\"ProductId\":\"prod-1\",\"ProductName\":\"Wireless Mouse\",\"Quantity\":2,\"UnitPrice\":29.99},{\"ProductId\":\"prod-2\",\"ProductName\":\"Mechanical Keyboard\",\"Quantity\":1,\"UnitPrice\":89.99}]"}}'
+          aws --endpoint-url=$$ENDPOINT dynamodb put-item --table-name $$TABLE --item \
+            '{"id":{"S":"order-sample-2"},"orderDate":{"S":"2026-06-10"},"customerId":{"S":"cust-1"},"totalAmount":{"N":"89.98"},"status":{"S":"Confirmed"},"createdAt":{"S":"2026-06-10T00:00:00.0000000Z"},"updatedAt":{"S":"2026-06-10T06:00:00.0000000Z"},"items":{"S":"[{\"ProductId\":\"prod-3\",\"ProductName\":\"USB Hub\",\"Quantity\":1,\"UnitPrice\":19.99},{\"ProductId\":\"prod-4\",\"ProductName\":\"Webcam\",\"Quantity\":1,\"UnitPrice\":69.99}]"}}'
+          aws --endpoint-url=$$ENDPOINT dynamodb put-item --table-name $$TABLE --item \
+            '{"id":{"S":"order-sample-3"},"orderDate":{"S":"2026-06-15"},"customerId":{"S":"cust-2"},"totalAmount":{"N":"199.98"},"status":{"S":"Processing"},"createdAt":{"S":"2026-06-15T00:00:00.0000000Z"},"updatedAt":{"S":"2026-06-15T12:00:00.0000000Z"},"items":{"S":"[{\"ProductId\":\"prod-5\",\"ProductName\":\"Gaming Headset\",\"Quantity\":2,\"UnitPrice\":99.99}]"}}'
+          aws --endpoint-url=$$ENDPOINT dynamodb put-item --table-name $$TABLE --item \
+            '{"id":{"S":"order-sample-4"},"orderDate":{"S":"2026-06-20"},"customerId":{"S":"cust-2"},"totalAmount":{"N":"35.97"},"status":{"S":"Delivered"},"createdAt":{"S":"2026-06-20T00:00:00.0000000Z"},"updatedAt":{"S":"2026-06-22T00:00:00.0000000Z"},"items":{"S":"[{\"ProductId\":\"prod-6\",\"ProductName\":\"Mouse Pad\",\"Quantity\":1,\"UnitPrice\":15.99},{\"ProductId\":\"prod-7\",\"ProductName\":\"USB Cable\",\"Quantity\":2,\"UnitPrice\":9.99}]"}}'
+          aws --endpoint-url=$$ENDPOINT dynamodb put-item --table-name $$TABLE --item \
+            '{"id":{"S":"order-sample-5"},"orderDate":{"S":"2026-06-25"},"customerId":{"S":"cust-3"},"totalAmount":{"N":"79.99"},"status":{"S":"Cancelled"},"createdAt":{"S":"2026-06-25T00:00:00.0000000Z"},"updatedAt":{"S":"2026-06-25T01:00:00.0000000Z"},"items":{"S":"[{\"ProductId\":\"prod-8\",\"ProductName\":\"Monitor Stand\",\"Quantity\":1,\"UnitPrice\":79.99}]"}}'
+          echo 'Seeding complete.'
+        fi
+
+        PAYMENTS_TABLE=Payments-local
+        if aws --endpoint-url=$$ENDPOINT dynamodb describe-table --table-name $$PAYMENTS_TABLE 2>/dev/null; then
+          echo 'Payments table already exists, skipping creation.'
+        else
+          echo 'Creating Payments DynamoDB table...'
+          aws --endpoint-url=$$ENDPOINT dynamodb create-table \
+            --table-name $$PAYMENTS_TABLE \
+            --attribute-definitions \
+              AttributeName=id,AttributeType=S \
+              AttributeName=orderId,AttributeType=S \
+            --key-schema AttributeName=id,KeyType=HASH \
+            --billing-mode PAY_PER_REQUEST \
+            --global-secondary-indexes '[{"IndexName":"OrderIdIndex","KeySchema":[{"AttributeName":"orderId","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}]'
+        fi
+
+        echo 'Setup complete.'
+    networks:
+      - openmind-local
+
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sns,sqs
+      - DEFAULT_REGION=ap-southeast-2
+      - AWS_DEFAULT_REGION=ap-southeast-2
+    networks:
+      - openmind-local
+
+  localstack-setup:
+    image: amazon/aws-cli
+    depends_on:
+      - localstack
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-southeast-2
+    entrypoint: ["/bin/sh"]
+    command:
+      - "-c"
+      - |
+        ENDPOINT=http://localstack:4566
+
+        until aws --endpoint-url=$$ENDPOINT sns list-topics 2>/dev/null; do
+          echo 'Waiting for LocalStack...'
+          sleep 2
+        done
+
+        ORDER_TOPIC_ARN=$$(aws --endpoint-url=$$ENDPOINT sns create-topic --name order-events-topic-local.fifo --attributes FifoTopic=true,ContentBasedDeduplication=true --query TopicArn --output text)
+        PAYMENT_TOPIC_ARN=$$(aws --endpoint-url=$$ENDPOINT sns create-topic --name payment-events-topic-local.fifo --attributes FifoTopic=true,ContentBasedDeduplication=true --query TopicArn --output text)
+
+        PAYMENT_ORDER_QUEUE_URL=$$(aws --endpoint-url=$$ENDPOINT sqs create-queue --queue-name payment-order-events-sqs-local.fifo --attributes FifoQueue=true,ContentBasedDeduplication=true --query QueueUrl --output text)
+        ORDER_PAYMENT_QUEUE_URL=$$(aws --endpoint-url=$$ENDPOINT sqs create-queue --queue-name order-payment-events-sqs-local.fifo --attributes FifoQueue=true,ContentBasedDeduplication=true --query QueueUrl --output text)
+
+        PAYMENT_ORDER_QUEUE_ARN=$$(aws --endpoint-url=$$ENDPOINT sqs get-queue-attributes --queue-url $$PAYMENT_ORDER_QUEUE_URL --attribute-names QueueArn --query Attributes.QueueArn --output text)
+        ORDER_PAYMENT_QUEUE_ARN=$$(aws --endpoint-url=$$ENDPOINT sqs get-queue-attributes --queue-url $$ORDER_PAYMENT_QUEUE_URL --attribute-names QueueArn --query Attributes.QueueArn --output text)
+
+        aws --endpoint-url=$$ENDPOINT sns subscribe \
+          --topic-arn $$ORDER_TOPIC_ARN \
+          --protocol sqs \
+          --notification-endpoint $$PAYMENT_ORDER_QUEUE_ARN \
+          --attributes '{"FilterPolicy":"{\"EventType\":[\"OrderPlaced\"]}"}'
+
+        aws --endpoint-url=$$ENDPOINT sns subscribe \
+          --topic-arn $$PAYMENT_TOPIC_ARN \
+          --protocol sqs \
+          --notification-endpoint $$ORDER_PAYMENT_QUEUE_ARN \
+          --attributes '{"FilterPolicy":"{\"EventType\":[\"PaymentProcessed\"]}"}'
+
+        echo 'LocalStack setup complete.'
+        echo "  order-events-topic-local.fifo ARN:   $$ORDER_TOPIC_ARN"
+        echo "  payment-events-topic-local ARN: $$PAYMENT_TOPIC_ARN"
+    networks:
+      - openmind-local
+
+  order-api:
+    build:
+      context: .
+      dockerfile: src/Order.Api/Dockerfile
+    depends_on:
+      dynamodb-setup:
+        condition: service_completed_successfully
+      localstack-setup:
+        condition: service_completed_successfully
+    ports:
+      - "8081:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ORDERS_TABLE: Orders-local
+      USE_LOCAL_EVENT_BUS: "true"
+      LOCALSTACK_ENDPOINT: http://localstack:4566
+      ORDER_EVENTS_TOPIC_ARN: arn:aws:sns:ap-southeast-2:000000000000:order-events-topic-local.fifo
+      ORDER_PAYMENT_QUEUE_URL: http://localstack:4566/000000000000/order-payment-events-sqs-local.fifo
+      AWS_ENDPOINT_URL: http://dynamodb-local:8000
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-southeast-2
+    networks:
+      - openmind-local
+
+  payment-api:
+    build:
+      context: .
+      dockerfile: src/Payment.Api/Dockerfile
+    depends_on:
+      dynamodb-setup:
+        condition: service_completed_successfully
+      localstack-setup:
+        condition: service_completed_successfully
+    ports:
+      - "8082:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      PAYMENTS_TABLE: Payments-local
+      USE_LOCAL_EVENT_BUS: "true"
+      LOCALSTACK_ENDPOINT: http://localstack:4566
+      PAYMENT_EVENTS_TOPIC_ARN: arn:aws:sns:ap-southeast-2:000000000000:payment-events-topic-local.fifo
+      PAYMENT_ORDER_QUEUE_URL: http://localstack:4566/000000000000/payment-order-events-sqs-local.fifo
+      AWS_ENDPOINT_URL: http://dynamodb-local:8000
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ap-southeast-2
+    networks:
+      - openmind-local
+
+networks:
+  openmind-local:
+    name: openmind-local
+
+volumes:
+  dynamodb-data:
