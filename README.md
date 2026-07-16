@@ -1,339 +1,178 @@
-# Vertical Slice Architecture with ASP.NET Core Minimal APIs
+# Vertical Slice Architecture
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Design Strategy](#design-strategy)
-- [AWS Services Used](#aws-services-used)
-- [SNS-SQS](#sns-sqs)
-  - [Pattern: Fan-out via SNS → SQS](#pattern-fan-out-via-sns--sqs)
-  - [Standard vs FIFO](#standard-vs-fifo)
-  - [Message Ordering with FIFO](#message-ordering-with-fifo)
-  - [Consuming from SQS](#consuming-from-sqs)
-- [DynamoDB](#dynamodb)
-  - [Partition key](#partition-key)
-  - [Partition key + Sort key](#partition-key--sort-key)
-  - [Global Secondary Index](#global-secondary-index)
-  - [Local Secondary Index](#local-secondary-index)
-  - [Scan Request](#scan-request)
-  - [UI Tool](#ui-tool)
-- [Run](#run)
+- [What Is Vertical Slice Architecture?](#what-is-vertical-slice-architecture)
+- [Origin](#origin)
+- [VSA vs. Layered / Clean / Onion Architecture](#vsa-vs-layered--clean--onion-architecture)
+- [Core Principles](#core-principles)
+- [How This Repo Applies VSA](#how-this-repo-applies-vsa)
+- [Shared Code: What Belongs There](#shared-code-what-belongs-there)
+- [DDD and Vertical Slice Architecture](#ddd-and-vertical-slice-architecture)
+- [VSA and Clean Architecture Together](#vsa-and-clean-architecture-together)
+- [Benefits](#benefits)
+- [Challenges](#challenges)
+- [When VSA Fits — and When It Doesn't](#when-vsa-fits--and-when-it-doesnt)
 - [References](#references)
 
-## Overview
+## What Is Vertical Slice Architecture?
 
-This repo demonstrates **Vertical Slice Architecture (VSA)**: instead of organizing code into horizontal technical layers (controllers/, services/, repositories/), each business use case ("slice") is a self-contained folder under `Features/` holding everything that use case needs — its command/query, handler, validator, and HTTP endpoint mapping. Slices depend on shared `Domain`/`Infrastructure` building blocks but not on each other.
+Vertical Slice Architecture (VSA) organizes code around **business use cases (features)** instead of **technical layers**.
 
-`Order.Api` and `Payment.Api` are each a single ASP.NET Core **Minimal API** process (Kestrel), one per Bounded Context. This repo was originally built on AWS Lambda (one function per use case, fronted by API Gateway); it has since been lifted onto a normal host to keep the focus on VSA rather than FaaS. DynamoDB (persistence) and SNS/SQS (cross-BC eventing) are retained from that era and are still genuinely useful here — see the [AWS Services](#aws-services-used) and [SNS-SQS](#sns-sqs) sections below.
+A traditional "N-layer" codebase groups files horizontally — every controller lives in `Controllers/`, every service in `Services/`, every repository in `Repositories/`. To understand or change one feature, you jump across every layer, touching a little bit of each folder.
 
-## Design Strategy
+VSA cuts the other way. Each use case — "create an order," "get an order by id," "cancel an order" — gets its own folder containing **everything that use case needs**: its request/response model, validation, business logic, and (if applicable) its HTTP endpoint. That folder is the "slice." Slices are stacked side by side, each one a full vertical cut through the system, from the wire to the domain — hence *vertical*, as opposed to the *horizontal* layers of a traditional architecture.
 
-Slices should be grouped by Bounded Context (BC). In general, each BC should be owned by a single team and have its own Git repository.
+The guiding heuristic, often attributed to Jimmy Bogard: **"minimize coupling between slices, and maximize coupling in a slice."** Code that changes together lives together; code that rarely changes together is allowed to be duplicated rather than prematurely shared.
 
-BC is a self-contained business domain with its own ubiquitous language, domain model, and team ownership. Visit https://github.com/tung-le-lv/OpenMind.DDD.Patterns for more.
+## Origin
 
-In an e-commerce platform, we typically have the following BCs:
+The term **"Vertical Slice Architecture"** was coined and popularized by **Jimmy Bogard** (creator of [MediatR](https://github.com/jbogard/MediatR) and [AutoMapper](https://github.com/AutoMapper/AutoMapper)) in his December 2018 blog post *["Vertical Slice Architecture"](https://www.jimmybogard.com/vertical-slice-architecture/)*. Bogard had spent years advocating for CQRS (Command Query Responsibility Segregation) in .NET applications, and MediatR — a lightweight in-process mediator — became the natural building block for it: each command/query gets exactly one handler, and that pairing became the seed of a "slice."
 
-```
-order/          ← order lifecycle, line items, status
-catalog/        ← product listings, inventory levels, pricing
-customer/       ← accounts, addresses, loyalty points
-payment/        ← charge, refund, payment method management
-notification/   ← email, SMS, push notifications
-```
+VSA didn't appear out of nowhere. It formalizes and names a pattern that had been converging in the industry for a while:
 
-**Within a service, one slice per use case.** Each feature folder under `Features/` is a self-registering minimal API endpoint (`IEndpoint` — see `Shared/IEndpoint.cs` / `Shared/EndpointExtensions.cs`): `Program.cs` scans the assembly at startup and calls `MapEndpoint` on every implementation, so adding a new slice never requires touching `Program.cs`.
+- **"Package by feature, not layer"** — articulated by Dan North and others in the mid-2000s, arguing that organizing code by technical role scatters the concept of a single feature across the codebase.
+- **"Screaming Architecture"** — Robert C. Martin's argument that a codebase's top-level structure should reveal what the system *does* (its use cases), not which framework or layering pattern it uses.
+- **CQRS** — separating reads from writes, which naturally produces two different code paths per entity instead of one shared, layered pipeline.
+
+Bogard's contribution was tying these ideas together into a concrete, named architecture for line-of-business apps, paired with a pragmatic implementation recipe (MediatR handlers, one per feature) that spread quickly through the .NET community via his blog, conference talks, and the ubiquity of MediatR itself.
+
+## VSA vs. Layered / Clean / Onion Architecture
+
+| | Layered / Clean / Onion | Vertical Slice |
+|---|---|---|
+| **Organized by** | Technical concern (Controllers, Services, Repositories, Domain) | Business use case (CreateOrder, CancelOrder, GetOrder) |
+| **Change locality** | One feature change touches every layer | One feature change touches one folder |
+| **Reuse strategy** | Shared services/base classes by default | Duplication allowed by default; extract shared code only once a real, stable pattern emerges |
+| **Where coupling lives** | Across layers (interfaces bind them together) | Across slices is minimized; within a slice, coupling is fine |
+| **Typical entry point** | A "fat" controller or service with many responsibilities | A small, single-purpose handler per use case |
+
+VSA isn't necessarily opposed to Clean/Onion Architecture's *dependency rule* (domain has no outward dependencies) — it's opposed to the *folder-by-layer* convention. You can (and this repo does) still keep a shared `Domain/` and `Infrastructure/` for genuinely cross-cutting building blocks; the difference is that a feature is the primary unit of organization, not the layer.
+
+## Core Principles
+
+1. **One slice, one use case.** Everything a use case needs — request, validation, handler/business logic, endpoint mapping — lives in one folder.
+2. **Minimize coupling *between* slices.** A slice should not reach into another slice's internals. Shared code goes into an explicitly shared, stable module (domain entities, cross-cutting infrastructure) — not into "helper" classes shared ad hoc between two features.
+3. **Duplication over premature abstraction.** Two slices that look similar today are allowed to have similar-looking code. They may diverge tomorrow for reasons that have nothing to do with each other; sharing that code prematurely couples their futures together.
+4. **The slice, not the layer, is the unit of change.** Adding a feature means adding a folder, not touching five existing files across five existing layers.
+5. **Different triggers, same shape.** A slice doesn't have to be triggered by HTTP — a message-queue consumer, a scheduled job, or a background worker reacting to a domain event is still a vertical slice; only the trigger at the top of the slice changes.
+
+## How This Repo Applies VSA
+
+This repo demonstrates VSA using **ASP.NET Core Minimal APIs** and **MediatR**, split across two Bounded Contexts (`Order.Api` and `Payment.Api`), each its own process.
 
 ```
 Features/
-  CreateOrder/       → CreateOrderEndpoint       POST   /orders
-  AddOrderItem/       → AddOrderItemEndpoint      POST   /orders/{id}/items
-  UpdateOrderStatus/  → UpdateOrderStatusEndpoint PUT    /orders/{id}/status
-  PlaceOrder/         → PlaceOrderEndpoint        POST   /orders/{id}/place
-  CancelOrder/        → CancelOrderEndpoint       POST   /orders/{id}/cancel
-  DeleteOrder/        → DeleteOrderEndpoint       DELETE /orders/{id}
-  GetOrder/           → GetOrderEndpoint          GET    /orders/{id}
-  GetAllOrders/       → GetAllOrdersEndpoint      GET    /orders
-  GetOrdersByCustomer/            → GetOrdersByCustomerEndpoint            GET /orders/customer/{customerId}
-  GetOrdersByCustomerAndStatus/   → GetOrdersByCustomerAndStatusEndpoint   GET /orders/customer/{customerId}/status/{status}
-  GetOrdersByDateRange/           → GetOrdersByDateRangeEndpoint           GET /orders/filter?date=YYYY-MM-DD
-  HandlePaymentProcessed/         → HandlePaymentProcessedConsumer (BackgroundService, consumes SQS — not an HTTP slice)
+  CreateOrder/
+    CreateOrderCommand.cs         ← the request
+    CreateOrderCommandHandler.cs  ← the business logic
+    CreateOrderValidator.cs       ← the validation rules
+    CreateOrderEndpoint.cs        ← the HTTP endpoint mapping
+  AddOrderItem/
+  UpdateOrderStatus/
+  PlaceOrder/
+  CancelOrder/
+  DeleteOrder/
+  GetOrder/
+  GetAllOrders/
+  GetOrdersByCustomer/
+  GetOrdersByCustomerAndStatus/
+  GetOrdersByDateRange/
+  HandlePaymentProcessed/         ← BackgroundService, consumes SQS — not an HTTP slice
 ```
 
-Note that I made Payment BC part of the same git repo as Order BC for demonstration purpose.
-
-### Not every slice is an HTTP endpoint
-
-`HandlePaymentProcessed` (Order.Api) and `ProcessPayment` (Payment.Api) react to messages on an SQS queue, not HTTP requests. Each is a `BackgroundService` that long-polls its queue and dispatches the same MediatR command a request handler would — it's still a self-contained vertical slice, just with a different trigger. `Payment.Api` has no HTTP-triggered slices at all today, so it runs as a pure background worker.
-
-## AWS Services Used
-
-| Layer | AWS Service | Why it fits |
-|---|---|---|
-| **Compute** | Kestrel / ASP.NET Core, containerized | Each BC is one normal, always-on web process — no per-route cold starts or execution-role sprawl to manage |
-| **Database** | DynamoDB | Scales at the table level; fully managed NoSQL; no connection pool to manage |
-| **Async messaging** | SNS/SQS | Fan-out pub/sub between bounded contexts |
-| **File storage** | S3 | Object storage |
-| **Orchestration** | Step Functions | Coordinates multi-step workflows (e.g. order → payment → fulfillment → notification) with retries, timeouts, and branching. This is actually a Process Manager or Saga Orchestator |
-
-## SNS-SQS
-
-### Pattern: Fan-out via SNS → SQS
-
-```
-[Service A] ──publish──▶ [SNS Topic] ──subscribe──▶ [SQS Queue A] ──poll──▶ [BackgroundService A]
-                                     └──subscribe──▶ [SQS Queue B] ──poll──▶ [BackgroundService B]
-```
-
-### Standard vs FIFO
-
-| | Standard | FIFO |
-|---|---|---|
-| Message ordering | Not guaranteed | Guaranteed per message group |
-| Duplicate delivery | Possible | Deduplicated (5-min window) |
-
-### Message Ordering with FIFO
-
-With a **FIFO** queue:
-
-1. **Publisher** sets `MessageGroupId = AggregateId` on each SNS publish call
-2. **SNS FIFO** preserves and propagates `MessageGroupId` to all subscribed SQS FIFO queues
-3. **SQS FIFO** enforces strict ordering within each group — no two messages with the same `MessageGroupId` are in-flight simultaneously
-4. **The consumer** processes at most **one message per group at a time**, regardless of how many consumer instances are running
-
-Events for aggregate with different IDs (different `MessageGroupId`) are fully parallel.
-
-If a message in group `order-A` fails and is retried, subsequent messages for `order-A` are blocked until the retry resolves. Messages for `order-B`, `order-C`, etc. are unaffected.
-
-![SNS-SQS](docs/sns-sqs.jpg)
-
-See [docs/sns-sqs-ordering.excalidraw](docs/sns-sqs-ordering.excalidraw).
-
-### Consuming from SQS
-
-Each subscribing slice owns a `BackgroundService` (e.g. `HandlePaymentProcessedConsumer`, `ProcessPaymentConsumer`) that long-polls its queue (`ReceiveMessageAsync` with `WaitTimeSeconds = 20`), dispatches the payload through MediatR exactly like an HTTP endpoint would, and deletes the message once handling succeeds — an unhandled exception simply leaves the message on the queue for the next poll (and eventually a DLQ, once one is configured) instead of deleting it. This replaces the old model where Lambda's event-source mapping polled SQS on the function's behalf and auto-scaled the number of concurrent pollers with queue depth; a single always-on consumer is enough for this repo's purposes, but the same pattern scales out by running more instances of the same host.
-
-## DynamoDB
-
-**Table Design**
-
-| `OrderId` | `CustomerId` | `OrderDate` | `LineItems` |
-| --- | --- | --- | --- |
-| order-001 | cus-001 | 2025-1-1 | [ { "ProductId": "prod-1", "ProductName": "Widget", "Quantity": 2, "UnitPrice": 9.99 }] |
-| order-002 | cus-001 | 2025-1-2 | [ { "ProductId": "prod-2", "ProductName": "Widget 2", "Quantity": 1, "UnitPrice": 8 }] |
-| order-003 | cus-002 | 2025-1-2 | [ { "ProductId": "prod-1", "ProductName": "Widget", "Quantity": 2, "UnitPrice": 9.99 }] |
-
-### Partition key
-
-`OrderId = PartitionKey`
-
-`OrderId`  is unique across the table → Primary key
-
-Scenario: Query pattern is for retrieving details for single order.
+Every slice implements a small `IEndpoint` interface (`Shared/IEndpoint.cs`):
 
 ```csharp
-return await _dynamoDbClient.GetItemAsync(new GetItemRequest
+public interface IEndpoint
 {
-    TableName = "Orders",
-    Key = new Dictionary<string, AttributeValue>
-    {
-        { "OrderId", new AttributeValue { S = orderId } }
-    }
-});
-```
-
-### Partition key + Sort key
-
-On a base table, keys must be unique:
-
-- Partition key only → one item per partition-key value.
-- Partition key + sort key → the combination must be unique → one partition-key value can hold multiple items.
-
-`CustomerId` = Partition Key
-`OrderDate` = Sort Key
-Primary key = `CustomerId + OrderDate`
-
-Scenario:
-
-- Frequently need to get all orders for a single customer.
-- Query for a specific order by `CustomerId + OrderDate`.
-- This setup means the `CustomerId` partition contains all of that customer's orders in sorted order by `OrderDate`.
-
-Query all orders for customer:
-
-```csharp
-var request = new QueryRequest
-{
-    TableName = "Orders",
-    KeyConditionExpression = "CustomerId = :customerId",
-    ExpressionAttributeValues = new Dictionary<string, AttributeValue>
-    {
-        { ":customerId", new AttributeValue { S = "CUST123" } }
-    }
-};
-
-var response = await _dynamoDbClient.QueryAsync(request);
-```
-
-Query exact customer + order:
-
-```csharp
-var request = new QueryRequest
-{
-    TableName = "Orders",
-    KeyConditionExpression = "CustomerId = :customerId AND OrderDate = :orderDate",
-    ExpressionAttributeValues = new Dictionary<string, AttributeValue>
-    {
-        { ":customerId", new AttributeValue { S = "CUST001" } },
-        { ":orderDate",  new AttributeValue { S = "2024-01-15" } }
-    },
-    ConsistentRead = true
-};
-
-var response = await _dynamoDbClient.QueryAsync(request);
-```
-
-### Global Secondary Index
-
-Global Secondary Index (GSI) lets you query by attributes that are not the base table's primary key.
-
-- A GSI is a read-only projection cloned from the base table, kept in sync asynchronously. You write to the base table, never to the GSI directly.
-- GSI reads are eventually consistent only.
-- GIS read model does not clone all properties from the base table unless you specify them (use **`INCLUDE`).**
-
-```powershell
-aws --endpoint-url=http://dynamodb-local:8000 dynamodb create-table -global-secondary-indexes '[{"IndexName":"CustomerIdIndex","KeySchema":[{"AttributeName":"customerId","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}]'
-```
-
-- GSI keys are not required to be unique (neither partition key, sort key, nor the combination).
-- GSI can be added or removed at any time after table creation.
-- Can create up to 20 GSI per table.
-- It requires IndexName (GSI name) in the query request.
-
-Example. Create GSI:
-
-- Partition Key: `OrderDate`
-- Sort Key: `OrderId`
-
-The base table uses `OrderId` as its partition key, so "find all orders on a given date" would require a full table `Scan`. Adding a GSI with `OrderDate` as the partition key turns that into an indexed `Query`.
-
-Items are placed into partitions by their partition key (`OrderDate`), so all orders on the same date are co-located automatically. Note that GSI keys are not required to be unique: many orders can share the same `OrderDate`, and the `Query` returns all of them.
-
-The `OrderId` sort key lets you:
-
-- narrow a query to a specific order or a range of `OrderId`s within a date,
-- return results in a predictable, sorted order, paginate stably.
-
-```csharp
-public async Task<List<Dictionary<string, AttributeValue>>>
-    QueryOrdersByDateAsync(DateTime orderDate)
-{
-    var request = new QueryRequest
-    {
-        TableName = "Orders",
-        IndexName = "OrderDate-OrderId-index",
-        KeyConditionExpression = "OrderDate = :pk",
-        ExpressionAttributeValues = new Dictionary<string, AttributeValue>
-        {
-            { ":pk", new AttributeValue { S = orderDate.ToString("yyyy-MM-dd") } }
-        }
-    };
-
-    return await _dynamoDbClient.QueryAsync(request);
+    void MapEndpoint(IEndpointRouteBuilder app);
 }
 ```
 
-### Local Secondary Index
+`Program.cs` scans the assembly at startup and calls `MapEndpoint` on every implementation it finds, so **adding a new slice never requires touching `Program.cs`** — no central route table to edit, no risk of merge conflicts between two developers adding unrelated features at the same time.
 
-Allow query on an alternate sort key, but same partition key as the base table. LSI must be defined when table is created.
+**Not every slice is an HTTP endpoint.** `HandlePaymentProcessed` (`Order.Api`) and `ProcessPayment` (`Payment.Api`) are `BackgroundService`s that long-poll an SQS queue and dispatch the same kind of MediatR command an HTTP handler would — same shape, different trigger. `Payment.Api` has no HTTP-triggered slices at all; it runs as a pure background worker.
 
-![lsi](docs/lsi.png)
+**Where sharing does happen:** `Domain/` (entities, value objects, domain events, repository interfaces) and `Infrastructure/` (concrete repository implementations, the event bus) are shared *within* a Bounded Context, because every slice in that BC legitimately depends on the same domain model. Slices do not depend on each other.
 
-Create Local Secondary Index:
+Slices are further grouped by **Bounded Context** — `order/`, `payment/`, and (in a fuller system) `catalog/`, `customer/`, `notification/` — each ideally owned by one team with its own repository. (Payment is folded into this repo alongside Order purely for demonstration purposes.)
 
-- Partition Key: `CustomerId` (same as base table)
-- Sort Key: `OrderTotal`
+## Shared Code: What Belongs There
 
-```csharp
-// Search cus-001's orders with total between 100 and 500, sorted by OrderTotal descending
-var request = new QueryRequest
-{
-    TableName = "Orders",
-    IndexName = "CustomerId-OrderTotal-index", // LSI name
-    KeyConditionExpression = "CustomerId = :customerId AND OrderTotal BETWEEN :min AND :max",
-    ExpressionAttributeValues = new Dictionary<string, AttributeValue>
-    {
-        { ":customerId", new AttributeValue { S = "CUST001" } },
-        { ":min", new AttributeValue { N = "100" } },
-        { ":max", new AttributeValue { N = "500" } }
-    },
-    ScanIndexForward = false  // largest totals first; omit or set true for ascending
-};
+VSA's default is duplication, not sharing — but some code genuinely has to be shared, or every slice reinvents it. The question is *what kind* of code earns a place outside `Features/`, and this repo's `Domain/`, `Infrastructure/`, and `Shared/` folders draw that line in three different ways:
 
-var response = await _dynamoDbClient.QueryAsync(request);
-```
+| Folder | What lives there | Why it's shared, not duplicated |
+|---|---|---|
+| `Domain/` | Aggregates/entities (`OrderAggregate`), value objects, domain events, repository **interfaces** (`IOrderRepository`) | Every slice that touches an order operates on the *same* aggregate and must respect the *same* invariants — this is the one thing slices are explicitly meant to share within a Bounded Context. |
+| `Infrastructure/` | Concrete repository implementations (`DynamoDbOrderRepository`), event bus adapters | Expensive to build, doesn't vary per use case (persistence mechanics are the same whether you're creating or cancelling an order), and swapping it out should mean editing one class, not eleven. |
+| `Shared/` | The `IEndpoint` self-registration mechanism, `ValidationBehavior` (a MediatR pipeline behavior), `GlobalExceptionHandler`, the `ApiResponse`/`IOperationResult` response envelope, DI registration extensions | Cross-cutting *architecture* concerns — validation, error handling, response shaping — that apply identically to every slice and have nothing to do with any one feature's business rules. |
+| `Shared/Application/Dtos/` | Read-model DTOs and mappers (`OrderDto`, `OrderMapper`) | Query slices (`GetOrder`, `GetAllOrders`, `GetOrdersByCustomer`, …) all project the same aggregate into the same shape; duplicating that mapping five times buys nothing. |
 
-### Scan Request
+A practical guideline for anything that doesn't obviously fall into one of these buckets: don't extract it the first time two slices look similar — wait for a **rule of three** (a genuinely identical third use) before generalizing. Two similar-looking validators or handlers today may diverge tomorrow for reasons specific to their own feature; sharing them prematurely re-couples slices that VSA was meant to keep independent.
 
-Can retrieve any data from table but need to scan the entire table.
+The failure mode to watch for is `Shared/` (or a `Common/`/`Helpers/` folder like it) turning into a dumping ground for anything that doesn't obviously belong to one feature — at which point it *is* a horizontal layer again, just under a different name. Code review discipline, not tooling, is what keeps it from growing back into one.
 
-```csharp
-var request = new ScanRequest
-{
-    TableName = "Orders",
-    FilterExpression = "OrderStatus = :status",
-    ExpressionAttributeValues = new Dictionary<string, AttributeValue>
-    {
-        { ":status", new AttributeValue { S = "Completed" } }
-    }
-};
+## DDD and Vertical Slice Architecture
 
-return await _dynamoDbClient.ScanAsync(request);
-```
+**Domain-Driven Design (DDD)** and VSA answer different questions and combine cleanly: DDD is about *how you model the business domain* (Bounded Contexts, ubiquitous language, aggregates, value objects, domain events); VSA is about *how you organize the code that operates on that model*. This repo leans on both at once:
 
-—> Better solution is to add a **GSI with `OrderStatus` as the partition key:**
+- **Bounded Context ↔ grouping of slices.** `Order.Api` and `Payment.Api` are separate Bounded Contexts, each with its own domain model and its own set of slices. A slice never reaches across a BC boundary directly — cross-BC communication goes through domain events on SNS/SQS, not a shared repository or shared entity.
+- **Aggregate ↔ the consistency boundary a slice operates within.** A slice's handler is thin on purpose: it loads (or creates) exactly one `OrderAggregate` via `IOrderRepository`, calls a domain method that enforces invariants (`PlaceOrder()`, `AddItem()`, `Cancel()`), and persists the result. The *business rule* — what makes a status transition valid, whether an item can still be added — lives on the aggregate, not in the handler.
+- **Domain Events ↔ the seam between a slice and the rest of the system.** `OrderAggregate` raises events internally (`OrderCreatedEvent`, `OrderPlacedEvent`, `OrderCancelledEvent`, …) without knowing who, if anyone, is listening. The handler publishes them through `IEventBus` after persisting, which is what lets `HandlePaymentProcessed` react in a different process entirely without the `Order` slices ever referencing `Payment.Api`.
+- **Repository ↔ one per aggregate, shared across every slice that needs it.** `IOrderRepository` is used by `CreateOrder`, `PlaceOrder`, `CancelOrder`, `GetOrder`, and more — one repository, many slices — because they all operate on the same aggregate, not because "data access" is a horizontal layer.
 
-```jsx
-var request = new QueryRequest
-{
-    TableName = "Orders",
-    IndexName = "OrderStatus-index",
-    KeyConditionExpression = "OrderStatus = :status",
-    ExpressionAttributeValues = new Dictionary<string, AttributeValue>
-    {
-        { ":status", new AttributeValue { S = "Completed" } }
-    }
-};
+**The risk VSA introduces for DDD:** because a slice's handler has direct, easy access to persistence and infrastructure, it's tempting to skip the aggregate and put business logic straight into the handler ("just check the status here, it's faster"). That's how an anemic domain model creeps back in — VSA makes it *easy* to bypass the aggregate, it doesn't make it *wrong* to do so, so keeping "handlers orchestrate, aggregates decide" as a hard rule is a discipline the architecture doesn't enforce for you.
 
-return await _dynamoDbClient.QueryAsync(request);
-```
+## VSA and Clean Architecture Together
 
-### UI Tool
-Use [NoSQL Workbench](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/workbench.html) to browse data locally.
-
-Add a connection: **Operation Builder → Add Connection → DynamoDB Local → hostname `localhost`, port `8000`**.
-
-![NoSQL Workbench](docs/aws-workbench.jpg)
-
-## Run
-
-**Full local stack** (DynamoDB Local, LocalStack SNS/SQS, both APIs, all wired together):
+VSA and Clean/Onion Architecture are often framed as alternatives, but they answer orthogonal questions: Clean Architecture is about **dependency direction** (the Dependency Rule — dependencies point inward, and nothing inside the domain depends on infrastructure or presentation); VSA is about **navigation and organization** (feature vs. layer). Nothing stops you from keeping the Dependency Rule *inside* every slice while dropping the "layer-first folder" convention — which is exactly what this repo does:
 
 ```
-docker compose up --build
+CreateOrderEndpoint          → outermost: presentation, maps HTTP → command
+CreateOrderCommandHandler    → application/use-case: orchestrates, depends on abstractions only
+CreateOrderValidator         → application: input rules, runs as a pipeline behavior before the handler
+OrderAggregate (Domain/)     → innermost: entities/invariants, zero framework dependencies
+IOrderRepository (Domain/)   → abstraction the application layer depends on (Dependency Inversion)
+DynamoDbOrderRepository      → outermost: infrastructure, implements the Domain-owned interface
+    (Infrastructure/)
 ```
 
-- `Order.Api` → http://localhost:8081 (see the route table in [Design Strategy](#design-strategy))
-- `Payment.Api` → http://localhost:8082 (background worker only, no HTTP routes)
+The dependency arrows still point the way Clean Architecture demands: `CreateOrderCommandHandler` depends on `IOrderRepository`, never on `DynamoDbOrderRepository`; `OrderAggregate` depends on nothing outside `Domain/`. The difference from a "classic" Clean Architecture solution is purely physical: instead of four projects (`Domain`, `Application`, `Infrastructure`, `Api`) each containing a little bit of every feature, this repo keeps the same dependency direction but organizes the *application and presentation* layers by feature folder, and shares only `Domain/` and `Infrastructure/` across the whole Bounded Context. You get Clean Architecture's inward-pointing dependencies *and* VSA's one-feature-one-folder navigation, rather than choosing between them. (This blend is sometimes called "feature-folder Clean Architecture" in the .NET community; some Clean Architecture solution templates now ship a feature-folder variant for exactly this reason.)
 
-**Debugging a single service** — start its dependencies, then run/debug the project from your IDE (or `dotnet run --project src/Order.Api`) using the `http` launch profile in `Properties/launchSettings.json`:
+## Benefits
 
-```
-docker compose up dynamodb-local dynamodb-setup localstack localstack-setup
-dotnet run --project src/Order.Api
-dotnet run --project src/Payment.Api
-```
+- **Locality of change.** Understanding or modifying "cancel an order" means opening one folder, not tracing a call through five layers.
+- **Low blast radius.** Changing one slice's internals can't silently break an unrelated slice, since they don't share code by default.
+- **Parallel development.** Two developers building two different features rarely touch the same file, reducing merge conflicts — reinforced here by the self-registering `IEndpoint` pattern.
+- **Easier onboarding.** A new developer can be productive by reading and copying one existing slice, without first learning the whole layered call graph.
+- **Natural mapping to CQRS/event-driven design.** Every use case is already isolated, so adding messaging (queues, background workers) alongside HTTP is just another kind of slice, not an architectural detour.
+
+## Challenges
+
+- **Duplication can go too far.** "Prefer duplication over the wrong abstraction" is a guideline, not a law — teams that never revisit duplicated code end up with subtly-diverging copies of logic that should have been unified (e.g., validation rules for the same field, drifted across five handlers).
+- **Cross-cutting concerns still need a home.** Logging, auth, transaction handling, and validation don't belong to any one slice, but also shouldn't be reimplemented per slice. VSA typically pushes these into MediatR pipeline behaviors or middleware rather than the slices themselves — but deciding what's "cross-cutting enough" to centralize is a judgment call, and getting it wrong recreates layered coupling through the back door.
+- **No enforced boundary between slices.** Nothing stops a slice from reaching into another slice's handler or internals; discipline (and code review) has to substitute for a compiler-enforced rule.
+- **Granularity is subjective.** Is "update order status" one slice, or is "place order" (which also updates status) a separate slice that overlaps with it? Different teams draw these lines differently, and inconsistent granularity makes a codebase harder to navigate over time.
+- **Harder to see the "big picture."** Because there's no central service class listing every operation on an entity, understanding everything that can happen to an `Order` means listing folders under `Features/`, not reading one class.
+- **Migration cost from legacy layered systems.** Retrofitting VSA onto an existing layered codebase usually means slicing through existing services and repositories, which is disruptive if attempted all at once — most teams introduce VSA only for new features and let it coexist with legacy code for a while.
+- **Testing strategy needs adjustment.** Because a slice's handler is deliberately not decomposed into many small, independently-mockable services, teams often shift from unit-testing internal collaborators toward black-box/integration-style tests of the handler as a whole.
+
+## When VSA Fits — and When It Doesn't
+
+VSA earns its keep when a codebase has **many use cases whose logic genuinely differs** — an e-commerce order pipeline, a claims-processing system, anything with a long tail of commands and queries that each have their own validation and edge cases. The more those use cases diverge, the more a shared layered pipeline becomes a liability rather than a convenience.
+
+It's a poor fit — or at least overkill — for:
+
+- **Thin CRUD services** where every endpoint really is "validate, map, save," with no meaningful per-feature business logic. A generic repository/service pair is less code and less indirection than ten near-identical slices.
+- **Small teams or small codebases**, where the coordination problem VSA solves (many developers, many features, minimizing merge conflicts and cross-feature coupling) doesn't really exist yet.
+- **Systems whose core value *is* a shared, complex pipeline** (e.g., a single sophisticated pricing or tax-calculation engine used identically by every caller) — forcing that into "per slice" logic would duplicate the one thing that shouldn't be duplicated.
+
+In practice, many teams don't choose exclusively — they apply VSA to the use-case-heavy parts of a system (order lifecycle, claims, workflow steps) and keep simpler, layered or CRUD-style code for the parts that are genuinely uniform.
 
 ## References
-https://github.com/aws-samples  
-https://github.com/serverless/examples/tree/master/aws-dotnet-rest-api-with-dynamodb
+
+- Jimmy Bogard, [*Vertical Slice Architecture*](https://www.jimmybogard.com/vertical-slice-architecture/) (2018)
+- Jimmy Bogard, [MediatR](https://github.com/jbogard/MediatR)
+- Robert C. Martin, [*Screaming Architecture*](https://blog.cleancoder.com/uncle-bob/2011/09/30/Screaming-Architecture.html)
+- Bounded Context patterns: https://github.com/tung-le-lv/OpenMind.DDD.Patterns
