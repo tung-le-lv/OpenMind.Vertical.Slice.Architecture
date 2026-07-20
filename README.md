@@ -40,6 +40,8 @@ VSA isn't necessarily opposed to Clean/Onion Architecture's *dependency rule* (d
 
 Each slice owns its request handling logic end-to-end — the request, validation, data access, and response shaping all live together in the handler. At starting point, we can use transaction script. We don't even need Repository, just DbContext. That's fine because most CRUD-ish features never need more.  
 
+![image](docs/image.png)
+
 When you notice the same business rule showing up in multiple handlers, you push behavior down into the entities. The domain model is shared across slices; the handlers are not. Entities aren't duplicated per slice. What's per-slice is everything above the domain: DTOs, validators, queries, mapping.
 
 ## Challenges
