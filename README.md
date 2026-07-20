@@ -58,6 +58,4 @@ When you notice the same business rule showing up in multiple handlers, you push
 ## References
 
 - Jimmy Bogard, [*Vertical Slice Architecture*](https://www.jimmybogard.com/vertical-slice-architecture/) (2018)
-- Jimmy Bogard, [MediatR](https://github.com/jbogard/MediatR)
 - Robert C. Martin, [*Screaming Architecture*](https://blog.cleancoder.com/uncle-bob/2011/09/30/Screaming-Architecture.html)
-- Bounded Context patterns: https://github.com/tung-le-lv/OpenMind.DDD.Patterns
