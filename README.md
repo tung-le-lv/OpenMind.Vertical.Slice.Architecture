@@ -1,5 +1,3 @@
-# Vertical Slice Architecture
-
 ## Table of Contents
 
 - [What Is Vertical Slice Architecture?](#what-is-vertical-slice-architecture)
